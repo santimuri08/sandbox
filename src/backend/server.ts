@@ -13,11 +13,11 @@ import { schema, User } from '../../db/schema';
 import { AuthTesting } from '../frontend/pages/AuthTesting';
 import { Documentation } from '../frontend/pages/Documentation';
 import { Home } from '../frontend/pages/Home';
+import { Playground } from '../frontend/pages/Playground';
 import { docsViewEnum, themeCookie } from '../types/typebox';
 import { providerPlugin } from './plugins/providerPlugin';
 import { sandboxPlugin } from './plugins/sandboxPlugin';
 import { absoluteAuthConfig } from './utils/absoluteAuthConfig';
-import { Playground } from '../frontend/pages/Playground';
 const manifest = await build({
 	assetsDirectory: 'src/backend/assets',
 	reactDirectory: 'src/frontend'
