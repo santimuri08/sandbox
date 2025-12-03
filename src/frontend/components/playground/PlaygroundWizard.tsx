@@ -2,6 +2,7 @@ import { animated } from '@react-spring/web';
 import { useState, type ChangeEvent } from 'react';
 import type { ThemeProps } from '../../../types/springTypes';
 import type { PlaygroundConfig } from './PlaygroundPage';
+import { PrismPlus} from '../utils/PrismPlus'
 
 interface PlaygroundWizardProps extends ThemeProps {
 	onGenerate: (config: PlaygroundConfig) => void;
