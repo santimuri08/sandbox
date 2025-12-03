@@ -97,5 +97,4 @@ const server = new Elysia()
 	});
 export type Server = typeof server;
 
-
 // TODO : avoid using localhost as per RFC 8252 8.3 https://datatracker.ietf.org/doc/html/rfc8252#section-8.3
