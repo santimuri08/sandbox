@@ -373,10 +373,6 @@ const buildCliCommand = (
 	return parts.join(' ');
 };
 
-// ============================================================================
-// SUB-COMPONENTS
-// ============================================================================
-
 const StepHeader = ({ description, title }: StepHeaderProps) => (
 	<header style={{ marginBottom: '1.5rem' }}>
 		<h2 style={{ color: '#fff', fontSize: '1.5rem', marginBottom: '0.5rem' }}>
@@ -831,7 +827,7 @@ const ReviewStep = ({
 				padding: '0.75rem 1rem'
 			}}>
 				<p style={{ color: 'rgba(255,255,255,0.8)', fontSize: '0.875rem', margin: 0 }}>
-					Dependencies will be installed automatically. This may take 2-5 minutes.
+					Dependencies will be installed automatically.
 				</p>
 			</aside>
 		</section>
