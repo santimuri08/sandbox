@@ -5,9 +5,11 @@ import { PlaygroundPage } from '../components/playground/PlaygroundPage';
 import { useAuthStatus } from '../hooks/useAuthStatus';
 import { ThemeMode, useTheme } from '../hooks/useTheme';
 import { htmlDefault, bodyDefault } from '../styles/styles';
-type PlaygroundProps = {
+
+interface PlaygroundProps {
 	theme: ThemeMode | undefined;
-};
+}
+
 export const Playground = ({ theme }: PlaygroundProps) => {
 	const { user, handleSignOut } = useAuthStatus();
 	const [themeSprings, setTheme] = useTheme(theme);
