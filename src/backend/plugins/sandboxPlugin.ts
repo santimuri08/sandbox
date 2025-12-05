@@ -358,6 +358,140 @@ const executeProjectGeneration = async (config: PlaygroundConfig, tempDir: strin
 };
 
 // ============================================================================
+// CODESANDBOX SDK HELPER FUNCTIONS
+// ============================================================================
+
+const BINARY_EXTENSIONS = new Set([
+	'.ico', '.png', '.jpg', '.jpeg', '.gif', '.webp', 
+	'.woff', '.woff2', '.ttf', '.eot', 
+	'.mp3', '.mp4', '.wav', '.pdf', '.zip'
+]);
+
+const shouldSkipFile = (file: GeneratedFile): boolean => {
+	// Skip node_modules and .git
+	if (file.path.includes('node_modules') || file.path.startsWith('.git')) {
+		return true;
+	}
+	
+	// Skip bun.lock (binary format)
+	if (file.path === 'bun.lock' || file.path.endsWith('/bun.lock')) {
+		return true;
+	}
+	
+	// Skip binary files
+	const ext = '.' + (file.path.split('.').pop()?.toLowerCase() || '');
+	if (BINARY_EXTENSIONS.has(ext)) {
+		return true;
+	}
+	
+	// Skip files that couldn't be read
+	if (file.content.includes('Binary file') || file.content.includes('File too large')) {
+		return true;
+	}
+	
+	return false;
+};
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Path to the Node.js helper script for CodeSandbox SDK operations
+// This works around Bun's WebSocket incompatibility with the SDK
+const CSB_UPLOADER_SCRIPT = join(import.meta.dir, 'csb-uploader.mjs');
+
+type CSBResult = {
+	sandbox_id: string;
+	url?: string;
+	files_count?: number;
+	warning?: string;
+	error?: string;
+};
+
+const createDevboxWithFiles = async (files: GeneratedFile[], projectName: string): Promise<string> => {
+	console.warn('Creating CodeSandbox Devbox via Node.js helper...');
+	
+	// Filter files before sending to helper
+	const filteredFiles = files.filter(file => !shouldSkipFile(file));
+	
+	const input = JSON.stringify({
+		files: filteredFiles,
+		projectName
+	});
+	
+	// Run the Node.js helper script
+	// eslint-disable-next-line promise/avoid-new -- Wrapping callback-based spawn API
+	const result = await new Promise<CSBResult>((resolve, reject) => {
+		const proc = spawn('node', [CSB_UPLOADER_SCRIPT], {
+			env: { ...process.env },
+			stdio: ['pipe', 'pipe', 'pipe']
+		});
+		
+		let stdout = '';
+		let stderr = '';
+		
+		proc.stdout.on('data', (data: Buffer) => {
+			stdout += data.toString();
+		});
+		
+		proc.stderr.on('data', (data: Buffer) => {
+			const text = data.toString();
+			stderr += text;
+			// Log stderr for debugging
+			console.warn('[CSB Helper]', text.trim());
+		});
+		
+		proc.on('close', (code: number | null) => {
+			if (code !== 0) {
+				// Try to parse error from stdout/stderr
+				try {
+					const errResult = JSON.parse(stdout || stderr);
+					if (errResult.error) {
+						reject(new Error(errResult.error));
+						return;
+					}
+				} catch {
+					// Ignore parse errors
+				}
+				reject(new Error(`CSB helper exited with code ${code}: ${stderr || stdout}`));
+				return;
+			}
+			
+			try {
+				const parsed = JSON.parse(stdout);
+				resolve(parsed);
+			} catch (err) {
+				reject(new Error(`Failed to parse CSB helper output: ${stdout}`));
+			}
+		});
+		
+		proc.on('error', (err: Error) => {
+			reject(new Error(`Failed to spawn CSB helper: ${err.message}`));
+		});
+		
+		// Send input to stdin
+		proc.stdin.write(input);
+		proc.stdin.end();
+	});
+	
+	if (result.error) {
+		throw new Error(result.error);
+	}
+	
+	if (result.warning) {
+		console.warn(`[CSB Warning] ${result.warning}`);
+	}
+	
+	console.warn(`Devbox created: ${result.sandbox_id}`);
+	if (result.url) {
+		console.warn(`URL: ${result.url}`);
+	}
+	if (result.files_count) {
+		console.warn(`Files uploaded: ${result.files_count}`);
+	}
+	
+	return result.sandbox_id;
+};
+
+// ============================================================================
 // PLUGIN EXPORT
 // ============================================================================
 
@@ -482,54 +616,24 @@ export const sandboxPlugin = () =>
 					return error('Bad Request', 'No files provided');
 				}
 
+				// Check for API key
+				if (!process.env.CSB_API_KEY) {
+					return error('Internal Server Error', 'CSB_API_KEY environment variable is not configured');
+				}
+
 				try {
-					const binaryExtensions = ['.ico', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.woff', '.woff2', '.ttf', '.eot', '.mp3', '.mp4', '.wav', '.pdf', '.zip'];
-					const sandboxFiles: Record<string, { content: string | object }> = {};
-
-					// Send ONLY files from CLI - nothing added, nothing modified
-					for (const file of files) {
-						// Skip node_modules and .git
-						if (file.path.includes('node_modules') || file.path.startsWith('.git')) continue;
-						
-						// Skip binary files
-						const ext = '.' + file.path.split('.').pop()?.toLowerCase();
-						if (binaryExtensions.includes(ext)) continue;
-						if (file.content.includes('Binary file') || file.content.includes('File too large')) continue;
-
-						// Add file exactly as CLI generated it
-						if (file.path.endsWith('.json')) {
-							try {
-								sandboxFiles[file.path] = { content: JSON.parse(file.content) };
-							} catch {
-								sandboxFiles[file.path] = { content: file.content };
-							}
-						} else {
-							sandboxFiles[file.path] = { content: file.content };
-						}
-					}
-
-					console.warn('Sending to CodeSandbox:', Object.keys(sandboxFiles).length, 'exact CLI files');
-					console.warn('File paths:', Object.keys(sandboxFiles).slice(0, 10).join(', '));
-
-					const response = await fetch('https://codesandbox.io/api/v1/sandboxes/define?json=1', {
-						method: 'POST',
-						headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-						body: JSON.stringify({ files: sandboxFiles })
-					});
-
-					const responseText = await response.text();
-					if (!response.ok) {
-						console.warn('CodeSandbox error:', responseText);
-						return error('Internal Server Error', `CodeSandbox API error: ${response.status}`);
-					}
-
-					const data = JSON.parse(responseText);
-					console.warn('CodeSandbox created:', data.sandbox_id);
-					return { sandbox_id: data.sandbox_id };
+					console.warn('Creating CodeSandbox Devbox with SDK...');
+					console.warn(`Project: ${projectName}, Files: ${files.length}`);
+					
+					const sandboxId = await createDevboxWithFiles(files, projectName);
+					
+					console.warn(`Devbox created successfully: ${sandboxId}`);
+					
+					return { sandbox_id: sandboxId };
 				} catch (err) {
-					console.error('CodeSandbox creation error:', err);
+					console.error('CodeSandbox SDK error:', err);
 					const message = err instanceof Error ? err.message : 'Unknown error';
-					return error('Internal Server Error', `Failed to create CodeSandbox: ${message}`);
+					return error('Internal Server Error', `Failed to create CodeSandbox Devbox: ${message}`);
 				}
 			},
 			{
