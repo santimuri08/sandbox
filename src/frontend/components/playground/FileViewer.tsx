@@ -1,11 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import type { ThemeProps } from '../../../types/springTypes';
 import { CopyButton } from '../utils/CopyButton';
 import { PrismPlus } from '../utils/PrismPlus';
 
-// ============================================================================
-// TYPES
-// ============================================================================
+const DEPTH_INDENT = 1.25;
+const BASE_PADDING = 0.5;
 
 interface GeneratedFile {
 	path: string;
@@ -21,9 +20,22 @@ interface FileViewerProps extends ThemeProps {
 	onFilesChange?: (files: GeneratedFile[]) => void;
 }
 
-// ============================================================================
-// UTILITY FUNCTIONS
-// ============================================================================
+interface FileTreeNode {
+	name: string;
+	path: string;
+	isDirectory: boolean;
+	children: FileTreeNode[];
+	content: string;
+}
+
+interface FileTreeItemProps {
+	node: FileTreeNode;
+	depth: number;
+	selectedPath: string;
+	expandedPaths: Set<string>;
+	onSelect: (node: FileTreeNode) => void;
+	onToggle: (path: string) => void;
+}
 
 const triggerDownload = (blob: Blob, filename: string) => {
 	const url = URL.createObjectURL(blob);
@@ -48,28 +60,304 @@ const downloadProjectZip = async (projectName: string) => {
 	triggerDownload(blob, `${projectName}.zip`);
 };
 
-// Call backend to create CodeSandbox (avoids CORS)
-const createCodeSandbox = async (files: GeneratedFile[], projectName: string) => {
-	const response = await fetch('/api/v1/sandbox/codesandbox', {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json'
-		},
-		body: JSON.stringify({ files, projectName })
-	});
+const insertNodeAtPath = (
+	current: FileTreeNode[],
+	parts: string[],
+	partIndex: number,
+	fileContent: string
+) => {
+	const part = parts[partIndex];
+	if (!part) return;
+	
+	const isLast = partIndex === parts.length - 1;
+	let existing = current.find((item) => item.name === part);
 
-	if (!response.ok) {
-		const errorData = await response.json().catch(() => ({}));
-		throw new Error(errorData.message || `Server error: ${response.status}`);
+	if (!existing) {
+		existing = {
+			children: [], content: isLast ? fileContent : '', isDirectory: !isLast, name: part, path: parts.slice(0, partIndex + 1).join('/')
+		};
+		current.push(existing);
 	}
 
-	const data = await response.json();
-	return data.sandbox_id;
+	if (!isLast) {
+		insertNodeAtPath(existing.children, parts, partIndex + 1, fileContent);
+	}
 };
 
-// ============================================================================
-// COMPONENTS
-// ============================================================================
+const sortTreeNodes = (nodes: FileTreeNode[]) => {
+	nodes.sort((nodeA, nodeB) => {
+		if (nodeA.isDirectory !== nodeB.isDirectory) {
+			return nodeA.isDirectory ? -1 : 1;
+		}
+
+		return nodeA.name.localeCompare(nodeB.name);
+	});
+	for (const item of nodes) {
+		if (item.isDirectory) sortTreeNodes(item.children);
+	}
+};
+
+const buildFileTree = (files: GeneratedFile[]) => {
+	const root: FileTreeNode[] = [];
+
+	for (const file of files) {
+		const parts = file.path.split('/');
+		insertNodeAtPath(root, parts, 0, file.content);
+	}
+
+	sortTreeNodes(root);
+
+	return root;
+};
+
+const getLanguage = (path: string) => {
+	const ext = path.split('.').pop() || '';
+	const langs: Record<string, string> = {
+		css: 'css', html: 'html', js: 'javascript', json: 'json', jsx: 'javascript', md: 'markdown', ts: 'typescript', tsx: 'typescript'
+	};
+
+	return langs[ext] || 'plaintext';
+};
+
+const escapeHtml = (str: string) =>
+	str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+const highlightJson = (escaped: string) =>
+	escaped
+		.replace(/"([^"]+)":/g, '<span style="color:#9cdcfe">"$1"</span>:')
+		.replace(/: "([^"]+)"/g, ': <span style="color:#ce9178">"$1"</span>')
+		.replace(/: (\d+)/g, ': <span style="color:#b5cea8">$1</span>')
+		.replace(/: (true|false|null)/g, ': <span style="color:#569cd6">$1</span>');
+
+const highlightJavaScript = (escaped: string) => {
+	let result = escaped
+		.replace(/'([^']+)'/g, '<span style="color:#ce9178">\'$1\'</span>')
+		.replace(/"([^"]+)"/g, '<span style="color:#ce9178">"$1"</span>');
+
+	const kws = ['import', 'export', 'from', 'const', 'let', 'var', 'function', 'return', 'if', 'else', 'async', 'await', 'new', 'class', 'interface', 'type', 'extends', 'implements'];
+	for (const keyword of kws) {
+		result = result.replace(new RegExp(`\\b(${keyword})\\b`, 'g'), '<span style="color:#569cd6">$1</span>');
+	}
+
+	return result.replace(/(\/\/.*)/g, '<span style="color:#6a9955">$1</span>');
+};
+
+const highlightCode = (content: string, lang: string) => {
+	const escaped = escapeHtml(content || '');
+	if (lang === 'json') return highlightJson(escaped);
+	if (lang === 'typescript' || lang === 'javascript') return highlightJavaScript(escaped);
+
+	return escaped;
+};
+
+// eslint-disable-next-line absolute/no-explicit-return-type
+const findFirstFile = (nodes: FileTreeNode[]): FileTreeNode | null => {
+	for (const item of nodes) {
+		if (!item.isDirectory) return item;
+		const found: FileTreeNode | null = findFirstFile(item.children);
+		if (found) return found;
+	}
+
+	return null;
+};
+
+const getTreeIcon = (isDirectory: boolean, isExpanded: boolean) => {
+	if (!isDirectory) return '📄';
+
+	return isExpanded ? '📂' : '📁';
+};
+
+const FileTreeItem = ({
+	node, depth, selectedPath, expandedPaths, onSelect, onToggle
+}: FileTreeItemProps) => {
+	const isExpanded = expandedPaths.has(node.path);
+	const isSelected = selectedPath === node.path;
+	const icon = getTreeIcon(node.isDirectory, isExpanded);
+	const paddingLeft = `${depth * DEPTH_INDENT + BASE_PADDING}rem`;
+
+	const handleClick = () => {
+		if (node.isDirectory) {
+			onToggle(node.path);
+		} else {
+			onSelect(node);
+		}
+	};
+
+	return (
+		<li style={{ listStyle: 'none' }}>
+			<button
+				onClick={handleClick}
+				type="button"
+				style={{
+					alignItems: 'center',
+					backgroundColor: isSelected ? 'rgba(59, 130, 246, 0.2)' : 'transparent',
+					border: 'none',
+					borderLeft: isSelected ? '2px solid #3b82f6' : '2px solid transparent',
+					cursor: 'pointer',
+					display: 'flex',
+					padding: '0.35rem 0.5rem',
+					paddingLeft,
+					textAlign: 'left',
+					width: '100%'
+				}}
+			>
+				<span style={{ fontSize: '0.75rem', marginRight: '0.5rem' }}>{icon}</span>
+				<span style={{ color: node.isDirectory ? '#fff' : 'rgba(255,255,255,0.8)', fontFamily: 'monospace', fontSize: '0.875rem' }}>
+					{node.name}
+				</span>
+			</button>
+			{node.isDirectory && isExpanded && (
+				<ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+					{node.children.map((child) => (
+						<FileTreeItem
+							key={child.path}
+							node={child}
+							depth={depth + 1}
+							selectedPath={selectedPath}
+							expandedPaths={expandedPaths}
+							onSelect={onSelect}
+							onToggle={onToggle}
+						/>
+					))}
+				</ul>
+			)}
+		</li>
+	);
+};
+
+interface EditingButtonsProps {
+	onSave: () => void;
+	onCancel: () => void;
+}
+
+const EditingButtons = ({ onSave, onCancel }: EditingButtonsProps) => (
+	<>
+		<button onClick={onSave} type="button" style={{ backgroundColor: '#10b981', border: 'none', borderRadius: '4px', color: '#fff', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 500, padding: '0.375rem 0.75rem' }}>Save</button>
+		<button onClick={onCancel} type="button" style={{ backgroundColor: 'transparent', border: '1px solid rgba(255,255,255,0.3)', borderRadius: '4px', color: '#fff', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 500, padding: '0.375rem 0.75rem' }}>Cancel</button>
+	</>
+);
+
+interface ViewingButtonsProps {
+	onEdit: () => void;
+	fileContent: string;
+}
+
+const ViewingButtons = ({ onEdit, fileContent }: ViewingButtonsProps) => (
+	<>
+		<button onClick={onEdit} type="button" style={{ backgroundColor: '#3b82f6', border: 'none', borderRadius: '4px', color: '#fff', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 500, padding: '0.375rem 0.75rem' }}>Edit</button>
+		<CopyButton text={fileContent} />
+	</>
+);
+
+interface FileContentHeaderProps {
+	fileName: string;
+	isEditing: boolean;
+	fileContent: string;
+	onStartEdit: () => void;
+	onSaveEdit: () => void;
+	onCancelEdit: () => void;
+}
+
+const FileContentHeader = ({ fileName, isEditing, fileContent, onStartEdit, onSaveEdit, onCancelEdit }: FileContentHeaderProps) => (
+	<header style={{
+		alignItems: 'center',
+		backgroundColor: 'rgba(30, 30, 30, 0.9)',
+		borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
+		display: 'flex',
+		gap: '0.5rem',
+		justifyContent: 'space-between',
+		padding: '0.5rem 1rem'
+	}}>
+		<span style={{ color: 'rgba(255,255,255,0.8)', fontFamily: 'monospace', fontSize: '0.875rem' }}>
+			{fileName}
+			{isEditing && <span style={{ color: '#f59e0b', marginLeft: '0.5rem' }}>(editing)</span>}
+		</span>
+		<nav style={{ alignItems: 'center', display: 'flex', gap: '0.5rem' }}>
+			{isEditing ? (
+				<EditingButtons onSave={onSaveEdit} onCancel={onCancelEdit} />
+			) : (
+				<ViewingButtons onEdit={onStartEdit} fileContent={fileContent} />
+			)}
+		</nav>
+	</header>
+);
+
+interface FileEditAreaProps {
+	editedContent: string;
+	onContentChange: (value: string) => void;
+}
+
+const FileEditArea = ({ editedContent, onContentChange }: FileEditAreaProps) => (
+	<textarea
+		value={editedContent}
+		onChange={(evt) => onContentChange(evt.target.value)}
+		spellCheck={false}
+		style={{
+			backgroundColor: 'rgba(0, 0, 0, 0.3)',
+			border: 'none',
+			color: 'rgba(255, 255, 255, 0.9)',
+			flex: 1,
+			fontFamily: 'monospace',
+			fontSize: '0.8rem',
+			lineHeight: 1.5,
+			margin: 0,
+			outline: 'none',
+			padding: '1rem',
+			resize: 'none',
+			width: '100%'
+		}}
+	/>
+);
+
+interface FilePreviewProps {
+	fileContent: string;
+	filePath: string;
+}
+
+const FilePreview = ({ fileContent, filePath }: FilePreviewProps) => (
+	<pre
+		style={{
+			color: 'rgba(255, 255, 255, 0.9)',
+			fontFamily: 'monospace',
+			fontSize: '0.8rem',
+			lineHeight: 1.5,
+			margin: 0,
+			overflowY: 'auto',
+			padding: '1rem',
+			whiteSpace: 'pre-wrap',
+			wordBreak: 'break-all'
+		}}
+		dangerouslySetInnerHTML={{ __html: highlightCode(fileContent, getLanguage(filePath)) }}
+	/>
+);
+
+interface FileContentBodyProps {
+	isEditing: boolean;
+	editedContent: string;
+	fileContent: string;
+	filePath: string;
+	onContentChange: (value: string) => void;
+}
+
+const FileContentBody = ({ isEditing, editedContent, fileContent, filePath, onContentChange }: FileContentBodyProps) => {
+	if (isEditing) {
+		return <FileEditArea editedContent={editedContent} onContentChange={onContentChange} />;
+	}
+
+	return <FilePreview fileContent={fileContent} filePath={filePath} />;
+};
+
+const EmptyFileContent = () => (
+	<section style={{
+		alignItems: 'center',
+		color: 'rgba(255, 255, 255, 0.4)',
+		display: 'flex',
+		height: '100%',
+		justifyContent: 'center'
+	}}>
+		Select a file to view
+	</section>
+);
 
 interface CliSectionProps extends ThemeProps {
 	cliCommand: string;
@@ -78,6 +366,10 @@ interface CliSectionProps extends ThemeProps {
 
 const CliSection = ({ cliCommand, cliOutput, themeSprings }: CliSectionProps) => {
 	const [showOutput, setShowOutput] = useState(false);
+
+	const handleToggle = () => {
+		setShowOutput((prev) => !prev);
+	};
 
 	return (
 		<section style={{
@@ -93,18 +385,15 @@ const CliSection = ({ cliCommand, cliOutput, themeSprings }: CliSectionProps) =>
 				justifyContent: 'space-between',
 				marginBottom: '0.5rem'
 			}}>
-				<div style={{ alignItems: 'center', display: 'flex', gap: '0.75rem' }}>
-					<span style={{ color: 'rgba(255,255,255,0.6)', fontSize: '0.75rem', letterSpacing: '0.05em', textTransform: 'uppercase' }}>
-						CLI Command
-					</span>
-					<CopyButton text={cliCommand} />
-				</div>
+				<span style={{ color: 'rgba(255,255,255,0.6)', fontSize: '0.75rem', letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+					CLI Command
+				</span>
 				<button
-					onClick={() => setShowOutput(!showOutput)}
+					onClick={handleToggle}
 					type="button"
 					style={{ background: 'none', border: 'none', color: '#3b82f6', cursor: 'pointer', fontSize: '0.75rem' }}
 				>
-					{showOutput ? 'Hide Output ▲' : 'Show Output ▼'}
+					{showOutput ? 'Hide ▲' : 'Show ▼'}
 				</button>
 			</header>
 			<PrismPlus codeString={cliCommand} language="bash" showLineNumbers={false} themeSprings={themeSprings} />
@@ -113,7 +402,7 @@ const CliSection = ({ cliCommand, cliOutput, themeSprings }: CliSectionProps) =>
 					backgroundColor: 'rgba(0, 0, 0, 0.3)',
 					borderRadius: '4px',
 					color: 'rgba(255, 255, 255, 0.8)',
-					fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
+					fontFamily: 'monospace',
 					fontSize: '0.75rem',
 					margin: '1rem 0 0 0',
 					maxHeight: '200px',
@@ -128,13 +417,13 @@ const CliSection = ({ cliCommand, cliOutput, themeSprings }: CliSectionProps) =>
 	);
 };
 
-interface HeaderProps {
+interface FileViewerHeaderProps {
 	files: GeneratedFile[];
 	projectName: string;
 	onStartOver: () => void;
 }
 
-const Header = ({ files, projectName, onStartOver }: HeaderProps) => {
+const FileViewerHeader = ({ files, projectName, onStartOver }: FileViewerHeaderProps) => {
 	const handleDownload = async () => {
 		try {
 			await downloadProjectZip(projectName);
@@ -199,169 +488,201 @@ const Header = ({ files, projectName, onStartOver }: HeaderProps) => {
 	);
 };
 
-// ============================================================================
-// MAIN COMPONENT
-// ============================================================================
+interface FileSidebarProps {
+	projectName: string;
+	fileTree: FileTreeNode[];
+	selectedPath: string;
+	expandedPaths: Set<string>;
+	onSelect: (node: FileTreeNode) => void;
+	onToggle: (path: string) => void;
+}
+
+const FileSidebar = ({ projectName, fileTree, selectedPath, expandedPaths, onSelect, onToggle }: FileSidebarProps) => (
+	<aside style={{ backgroundColor: 'rgba(30, 30, 30, 0.9)', maxHeight: '600px', overflowY: 'auto' }}>
+		<header style={{
+			borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
+			color: 'rgba(255, 255, 255, 0.6)',
+			fontSize: '0.75rem',
+			fontWeight: 600,
+			letterSpacing: '0.05em',
+			padding: '0.75rem 1rem',
+			textTransform: 'uppercase'
+		}}>
+			{projectName}
+		</header>
+		<ul style={{ listStyle: 'none', margin: 0, padding: '0.5rem 0' }}>
+			{fileTree.map((treeNode) => (
+				<FileTreeItem
+					key={treeNode.path}
+					node={treeNode}
+					depth={0}
+					selectedPath={selectedPath}
+					expandedPaths={expandedPaths}
+					onSelect={onSelect}
+					onToggle={onToggle}
+				/>
+			))}
+		</ul>
+	</aside>
+);
+
+interface FileContentPanelProps {
+	selectedFile: FileTreeNode | null;
+	isEditing: boolean;
+	editedContent: string;
+	onStartEdit: () => void;
+	onSaveEdit: () => void;
+	onCancelEdit: () => void;
+	onContentChange: (value: string) => void;
+}
+
+const FileContentPanel = ({
+	selectedFile,
+	isEditing,
+	editedContent,
+	onStartEdit,
+	onSaveEdit,
+	onCancelEdit,
+	onContentChange
+}: FileContentPanelProps) => (
+	<section style={{
+		backgroundColor: 'rgba(20, 20, 20, 0.95)',
+		display: 'flex',
+		flexDirection: 'column',
+		maxHeight: '600px'
+	}}>
+		{selectedFile ? (
+			<>
+				<FileContentHeader
+					fileName={selectedFile.name}
+					isEditing={isEditing}
+					fileContent={selectedFile.content}
+					onStartEdit={onStartEdit}
+					onSaveEdit={onSaveEdit}
+					onCancelEdit={onCancelEdit}
+				/>
+				<FileContentBody
+					isEditing={isEditing}
+					editedContent={editedContent}
+					fileContent={selectedFile.content}
+					filePath={selectedFile.path}
+					onContentChange={onContentChange}
+				/>
+			</>
+		) : (
+			<EmptyFileContent />
+		)}
+	</section>
+);
 
 export const FileViewer = ({
-	files,
-	projectName,
-	cliCommand,
-	cliOutput,
-	onStartOver,
-	themeSprings
+	files, projectName, cliCommand, cliOutput, onStartOver, themeSprings, onFilesChange
 }: FileViewerProps) => {
-	const [sandboxId, setSandboxId] = useState<string>('');
-	const [isLoading, setIsLoading] = useState(true);
-	const [error, setError] = useState('');
+	const [selectedFile, setSelectedFile] = useState<FileTreeNode | null>(null);
+	const [expandedPaths, setExpandedPaths] = useState(new Set(['src']));
+	const [isEditing, setIsEditing] = useState(false);
+	const [editedContent, setEditedContent] = useState('');
+
+	const fileTree = useMemo(() => buildFileTree(files), [files]);
 
 	useEffect(() => {
-		if (!files.length) return;
+		if (selectedFile || !files.length) return;
+		
+		const first = findFirstFile(fileTree);
+		if (first) setSelectedFile(first);
+	}, [fileTree, files.length, selectedFile]);
 
-		const loadSandbox = async () => {
-			setIsLoading(true);
-			setError('');
-
-			try {
-				const id = await createCodeSandbox(files, projectName);
-				setSandboxId(id);
-			} catch (err) {
-				console.error('Failed to create CodeSandbox:', err);
-				setError('Failed to create CodeSandbox. Please try again.');
-			} finally {
-				setIsLoading(false);
+	const handleToggle = (path: string) => {
+		setExpandedPaths((prev) => {
+			const next = new Set(prev);
+			if (next.has(path)) {
+				next.delete(path);
+			} else {
+				next.add(path);
 			}
-		};
 
-		loadSandbox();
-	}, [files, projectName]);
-
-	const handleRetry = async () => {
-		if (!files.length) return;
-
-		setIsLoading(true);
-		setError('');
-
-		try {
-			const id = await createCodeSandbox(files, projectName);
-			setSandboxId(id);
-		} catch (err) {
-			console.error('Failed to create CodeSandbox:', err);
-			setError('Failed to create CodeSandbox. Please try again.');
-		} finally {
-			setIsLoading(false);
-		}
+			return next;
+		});
 	};
 
-	const sandboxUrl = sandboxId 
-		? `https://codesandbox.io/embed/${sandboxId}?fontsize=14&hidenavigation=0&theme=dark&view=split`
-		: '';
+	const handleSelect = (fileNode: FileTreeNode) => {
+		if (isEditing) {
+			setIsEditing(false);
+			setEditedContent('');
+		}
+		setSelectedFile(fileNode);
+	};
+
+	const handleStartEdit = () => {
+		if (!selectedFile) return;
+		setEditedContent(selectedFile.content);
+		setIsEditing(true);
+	};
+
+	const handleCancelEdit = () => {
+		setIsEditing(false);
+		setEditedContent('');
+	};
+
+	const handleSaveEdit = () => {
+		if (!selectedFile || !onFilesChange) {
+			setIsEditing(false);
+
+			return;
+		}
+
+		const updated = files.map((file) =>
+			file.path === selectedFile.path ? { ...file, content: editedContent } : file
+		);
+
+		setSelectedFile({ ...selectedFile, content: editedContent });
+		onFilesChange(updated);
+		setIsEditing(false);
+		setEditedContent('');
+	};
+
+	const selectedPath = selectedFile?.path || '';
 
 	return (
 		<article style={{ marginTop: '2rem' }}>
-			<Header
+			<FileViewerHeader
 				files={files}
 				projectName={projectName}
 				onStartOver={onStartOver}
 			/>
-
 			<CliSection
 				cliCommand={cliCommand}
 				cliOutput={cliOutput}
 				themeSprings={themeSprings}
 			/>
-
-			{/* Full CodeSandbox Embed */}
 			<section style={{
-				backgroundColor: '#1e1e1e',
-				border: '1px solid #333',
+				backgroundColor: 'rgba(255, 255, 255, 0.1)',
+				border: '1px solid rgba(255, 255, 255, 0.1)',
 				borderRadius: '8px',
-				overflow: 'hidden',
-				position: 'relative'
+				display: 'grid',
+				gap: '1px',
+				gridTemplateColumns: '280px 1fr',
+				minHeight: '500px',
+				overflow: 'hidden'
 			}}>
-				{isLoading && (
-					<div style={{
-						alignItems: 'center',
-						backgroundColor: '#1e1e1e',
-						display: 'flex',
-						flexDirection: 'column',
-						gap: '1rem',
-						height: '700px',
-						justifyContent: 'center',
-						left: 0,
-						position: 'absolute',
-						top: 0,
-						width: '100%',
-						zIndex: 10
-					}}>
-						<div style={{
-							animation: 'spin 1s linear infinite',
-							border: '3px solid #333',
-							borderRadius: '50%',
-							borderTopColor: '#FFD700',
-							height: '40px',
-							width: '40px'
-						}} />
-						<span style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.9rem' }}>
-							Creating CodeSandbox...
-						</span>
-					</div>
-				)}
-
-				{error && (
-					<div style={{
-						alignItems: 'center',
-						backgroundColor: '#1e1e1e',
-						color: '#f87171',
-						display: 'flex',
-						flexDirection: 'column',
-						gap: '0.75rem',
-						height: '700px',
-						justifyContent: 'center',
-						padding: '2rem',
-						textAlign: 'center'
-					}}>
-						<span style={{ fontSize: '2rem' }}>⚠️</span>
-						<span style={{ fontSize: '1rem' }}>{error}</span>
-						<button
-							onClick={handleRetry}
-							type="button"
-							style={{
-								backgroundColor: '#3b82f6',
-								border: 'none',
-								borderRadius: '6px',
-								color: '#fff',
-								cursor: 'pointer',
-								fontSize: '0.875rem',
-								marginTop: '0.5rem',
-								padding: '0.5rem 1rem'
-							}}
-						>
-							Try Again
-						</button>
-					</div>
-				)}
-
-				{sandboxUrl && !error && !isLoading && (
-					<iframe
-						src={sandboxUrl}
-						style={{
-							border: 'none',
-							height: '700px',
-							width: '100%'
-						}}
-						title="CodeSandbox"
-						allow="accelerometer; ambient-light-sensor; camera; encrypted-media; geolocation; gyroscope; hid; microphone; midi; payment; usb; vr; xr-spatial-tracking"
-						sandbox="allow-forms allow-modals allow-popups allow-presentation allow-same-origin allow-scripts"
-					/>
-				)}
+				<FileSidebar
+					projectName={projectName}
+					fileTree={fileTree}
+					selectedPath={selectedPath}
+					expandedPaths={expandedPaths}
+					onSelect={handleSelect}
+					onToggle={handleToggle}
+				/>
+				<FileContentPanel
+					selectedFile={selectedFile}
+					isEditing={isEditing}
+					editedContent={editedContent}
+					onStartEdit={handleStartEdit}
+					onSaveEdit={handleSaveEdit}
+					onCancelEdit={handleCancelEdit}
+					onContentChange={setEditedContent}
+				/>
 			</section>
-
-			<style>{`
-				@keyframes spin {
-					to { transform: rotate(360deg); }
-				}
-			`}</style>
 		</article>
 	);
 };
